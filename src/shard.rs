@@ -1050,6 +1050,56 @@ impl<
         Ok(())
     }
 
+    pub fn replace_resident_with_placeholder<Q>(&mut self, hash: u64, key: &Q) -> Option<Plh>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        let Some(idx) = self.search(hash, key) else {
+            return None;
+        };
+        let (entry, _) = self.entries.get_mut(idx).unwrap();
+        let Entry::Resident(resident) = entry else {
+            return None;
+        };
+
+        // Save the resident data before replacing it
+        let old_key = &resident.key;
+        let old_value = &resident.value;
+        let old_state = resident.state;
+        let weight = self.weighter.weight(&old_key, &old_value);
+
+        // Create the placeholder
+        let shared = Plh::new(hash, idx);
+        *entry = Entry::Placeholder(Placeholder {
+            key: key.to_owned(),
+            hot: old_state,
+            shared: shared.clone(),
+        });
+
+        // Update the cache statistics
+        if old_state == ResidentState::Hot {
+            self.num_hot -= 1;
+            self.weight_hot -= weight;
+        } else {
+            self.num_cold -= 1;
+            self.weight_cold -= weight;
+        }
+
+        // Unlink from the appropriate list if it has weight
+        if weight != 0 {
+            let list_head = if old_state == ResidentState::Hot {
+                &mut self.hot_head
+            } else {
+                &mut self.cold_head
+            };
+            *list_head = self.entries.unlink(idx);
+        }
+
+        Some(shared)
+    }
+
+    /// When ?? occurs returns a pair of a place holder and a boolean indicating whether the upsert was successful
+    ///
     pub fn upsert_placeholder<Q>(
         &mut self,
         hash: u64,

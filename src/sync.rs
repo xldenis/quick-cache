@@ -464,6 +464,18 @@ impl<
         if let Some(v) = shard.read().get(hash, key) {
             if validation(v) {
                 return Ok(v.clone());
+            } else {
+                // Validation failed, replace the current element with a placeholder
+                if let Some(placeholder) =
+                    shard.write().replace_resident_with_placeholder(hash, key)
+                {
+                    // Return a placeholder guard for the replaced entry
+                    return Err(PlaceholderGuard::start_loading(
+                        &self.lifecycle,
+                        shard,
+                        placeholder,
+                    ));
+                }
             }
         }
 
