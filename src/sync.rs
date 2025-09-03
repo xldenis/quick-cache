@@ -445,6 +445,31 @@ impl<
         JoinFuture::new(&self.lifecycle, shard, hash, key).await
     }
 
+    /// Gets an item from the cache with key `key`.
+    ///
+    /// If the corresponding value isn't present in the cache, this functions returns a guard
+    /// that can be used to insert the value once it's computed.
+    /// While the returned guard is alive, other calls with the same key using the
+    /// `get_value_guard` or `get_or_insert` family of functions will wait until the guard
+    /// is dropped or the value is inserted.
+    pub async fn get_validate_value_or_guard_async<'a, Q>(
+        &'a self,
+        key: &Q,
+        mut validation: impl FnMut(&Val) -> bool,
+    ) -> Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>
+    where
+        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
+    {
+        let (shard, hash) = self.shard_for(key).unwrap();
+        if let Some(v) = shard.read().get(hash, key) {
+            if validation(v) {
+                return Ok(v.clone());
+            }
+        }
+
+        JoinFuture::new(&self.lifecycle, shard, hash, key).await
+    }
+
     /// Gets or inserts an item in the cache with key `key`.
     pub async fn get_or_insert_async<Q, E>(
         &self,
