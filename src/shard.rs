@@ -1050,62 +1050,16 @@ impl<
         Ok(())
     }
 
-    pub fn replace_resident_with_placeholder<Q>(&mut self, hash: u64, key: &Q) -> Option<Plh>
-    where
-        Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
-    {
-        let Some(idx) = self.search(hash, key) else {
-            return None;
-        };
-        let (entry, _) = self.entries.get_mut(idx).unwrap();
-
-        println!("blah 1");
-        let Entry::Resident(resident) = entry else {
-            return None;
-        };
-
-        // Save the resident data before replacing it
-        let old_key = &resident.key;
-        let old_value = &resident.value;
-        let old_state = resident.state;
-        let weight = self.weighter.weight(&old_key, &old_value);
-
-        // Create the placeholder
-        let shared = Plh::new(hash, idx);
-        *entry = Entry::Placeholder(Placeholder {
-            key: key.to_owned(),
-            hot: old_state,
-            shared: shared.clone(),
-        });
-
-        // Update the cache statistics
-        if old_state == ResidentState::Hot {
-            self.num_hot -= 1;
-            self.weight_hot -= weight;
-        } else {
-            self.num_cold -= 1;
-            self.weight_cold -= weight;
-        }
-
-        // Unlink from the appropriate list if it has weight
-        if weight != 0 {
-            let list_head = if old_state == ResidentState::Hot {
-                &mut self.hot_head
-            } else {
-                &mut self.cold_head
-            };
-            *list_head = self.entries.unlink(idx);
-        }
-
-        Some(shared)
-    }
-
-    /// When ?? occurs returns a pair of a place holder and a boolean indicating whether the upsert was successful
+    /// Upserts a placeholder, optionally validating existing resident values
     ///
+    /// Returns:
+    /// - `Ok((token, value))` if a valid resident was found
+    /// - `Err((placeholder, is_new))` where `is_new` indicates if this is a newly created placeholder
     pub fn upsert_placeholder<Q>(
         &mut self,
         hash: u64,
         key: &Q,
+        validator: &mut impl FnMut(&Val) -> bool,
     ) -> Result<(Token, &Val), (Plh, bool)>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
@@ -1115,6 +1069,44 @@ impl<
             let (entry, _) = self.entries.get_mut(idx).unwrap();
             match entry {
                 Entry::Resident(resident) => {
+                    // Check validation if provided
+                    if !validator(&resident.value) {
+                        // Validation failed, replace with placeholder
+                        let old_state = resident.state;
+                        let old_key = &resident.key;
+                        let old_value = &resident.value;
+                        let weight = self.weighter.weight(old_key, old_value);
+
+                        let shared = Plh::new(hash, idx);
+                        *entry = Entry::Placeholder(Placeholder {
+                            key: key.to_owned(),
+                            hot: old_state,
+                            shared: shared.clone(),
+                        });
+
+                        // Update statistics
+                        match old_state {
+                            ResidentState::Hot => {
+                                self.num_hot -= 1;
+                                self.weight_hot -= weight;
+                                if weight != 0 {
+                                    self.hot_head = self.entries.unlink(idx);
+                                }
+                            }
+                            ResidentState::Cold => {
+                                self.num_cold -= 1;
+                                self.weight_cold -= weight;
+                                if weight != 0 {
+                                    self.cold_head = self.entries.unlink(idx);
+                                }
+                            }
+                        }
+
+                        record_miss_mut!(self);
+                        return Err((shared, false)); // false = replaced existing
+                    }
+
+                    // Validation passed (or no validation), return resident
                     if *resident.referenced.get_mut() < MAX_F {
                         *resident.referenced.get_mut() += 1;
                     }

@@ -438,11 +438,7 @@ impl<
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
-        let (shard, hash) = self.shard_for(key).unwrap();
-        if let Some(v) = shard.read().get(hash, key) {
-            return Ok(v.clone());
-        }
-        JoinFuture::new(&self.lifecycle, shard, hash, key).await
+        self.get_validate_value_or_guard_async(key, |_| true).await
     }
 
     /// Gets an item from the cache with key `key`.
@@ -455,35 +451,26 @@ impl<
     pub async fn get_validate_value_or_guard_async<'a, Q>(
         &'a self,
         key: &Q,
-        mut validation: impl FnMut(&Val) -> bool,
+        mut validation: impl FnMut(&Val) -> bool + Unpin,
     ) -> Result<Val, PlaceholderGuard<'a, Key, Val, We, B, L>>
     where
         Q: Hash + Equivalent<Key> + ToOwned<Owned = Key> + ?Sized,
     {
         let (shard, hash) = self.shard_for(key).unwrap();
+
+        // Try fast path with read lock first
         {
             let reader = shard.read();
             if let Some(v) = reader.get(hash, key) {
                 if validation(v) {
                     return Ok(v.clone());
-                } else {
-                    drop(reader);
-                    // Validation failed, replace the current element with a placeholder
-                    if let Some(placeholder) =
-                        shard.write().replace_resident_with_placeholder(hash, key)
-                    {
-                        // Return a placeholder guard for the replaced entry
-                        return Err(PlaceholderGuard::start_loading(
-                            &self.lifecycle,
-                            shard,
-                            placeholder,
-                        ));
-                    }
                 }
+                // Validation failed, fall through to JoinFuture
             }
+            // No entry found or validation failed, let JoinFuture handle everything
         }
 
-        JoinFuture::new(&self.lifecycle, shard, hash, key).await
+        JoinFuture::new(&self.lifecycle, shard, hash, key, validation).await
     }
 
     /// Gets or inserts an item in the cache with key `key`.
