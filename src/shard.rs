@@ -1058,6 +1058,8 @@ impl<
             return None;
         };
         let (entry, _) = self.entries.get_mut(idx).unwrap();
+
+        println!("blah 1");
         let Entry::Resident(resident) = entry else {
             return None;
         };
